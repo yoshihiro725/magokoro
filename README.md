@@ -2,7 +2,7 @@
 
 高齢者向けAIコンパニオン（ver1.2）。LINE を入口に、見守りと会話を提供する。
 
-現在は**フェーズ0（疎通優先）**。本リポジトリはまだ「空の器」で、Day1時点では環境変数チェックのみが動く。アプリ機能（LINE Webhook 等）は D2 以降に載せる。
+現在は**フェーズ0（疎通優先）**。Day2 時点で LINE Webhook を受け取る Webサーバの雛形（署名検証＋オウム返し）まで動く。LLM接続・記憶・見守りは D3 以降。
 
 ## 必要環境
 - Node.js（LTS）
@@ -16,25 +16,60 @@ npm install
 
 # 2. 環境変数ファイルを作成
 cp .env.example .env
-#   → .env を開き、最低限 LINE_CHANNEL_ACCESS_TOKEN / LINE_CHANNEL_SECRET / OPENAI_API_KEY を設定する。
-#   （その他のキーは後続日で使うため、空のままでよい）
+#   → .env を開き、LINE_CHANNEL_ACCESS_TOKEN / LINE_CHANNEL_SECRET を設定する。
+#   （Day2 では OpenAIキーは不要。その他のキーも後続日で使うため空のままでよい）
 
-# 3. 起動（環境変数チェック）
+# 3. Webサーバを起動
 npm run dev
 ```
 
-- 必須3キーが未設定の場合、警告を出して終了する。
-- 必須3キーが揃っていれば「正常に起動しました」と表示される。
+- 起動すると `✅ listening on http://localhost:3000` が表示される。
+- `PORT` 環境変数で待受ポートを変更できる（未設定なら 3000）。
+- LINE2キーが未設定でも起動はするが、警告が出て `/webhook` の署名検証・返信は動かない。
+- env 単体チェックだけしたい場合は `npm run check:env`（必須3キーの状態を表示）。
 - `.env` は `.gitignore` 済み。**実値は絶対にコミットしない**。
 
 各キーの用途と取得元は [docs/ENV.md](docs/ENV.md) を参照。
 
+## エンドポイント
+
+| メソッド / パス | 説明 |
+| --- | --- |
+| `GET /health` | 死活確認。`200` と `{"status":"ok"}` を返す。 |
+| `POST /webhook` | LINE Webhook 受信。`X-Line-Signature` を Channel secret で HMAC-SHA256 検証し、不正なら `401`。検証OKなら各イベントを処理し `200` を返す。テキストメッセージは同じ内容で**オウム返し**（D3以降にLLM接続予定）。 |
+
+署名検証は **JSONパース前の生body（Buffer）** に対して行う。LINE以外からの偽リクエストはここで弾く。
+
+### ローカルでの署名付きテスト手順
+
+サーバ起動後、別ターミナルで：
+
+```bash
+# 1) 死活確認
+curl -i http://localhost:3000/health        # → 200 {"status":"ok"}
+
+# 2) 署名NG（ヘッダ無し）→ 401
+curl -i -X POST http://localhost:3000/webhook \
+  -H "Content-Type: application/json" -d '{"events":[]}'
+
+# 3) 署名OK → 200（サーバログにオウム返し対象が出る）
+SECRET=$(grep -E "^LINE_CHANNEL_SECRET=" .env | cut -d= -f2-)
+BODY='{"events":[{"type":"message","replyToken":"dummyReplyToken","message":{"type":"text","text":"こんにちは"}}]}'
+SIG=$(node -e "const c=require('crypto');process.stdout.write(c.createHmac('sha256',process.argv[1]).update(Buffer.from(process.argv[2],'utf8')).digest('base64'))" "$SECRET" "$BODY")
+curl -i -X POST http://localhost:3000/webhook \
+  -H "Content-Type: application/json" -H "X-Line-Signature: $SIG" -d "$BODY"
+```
+
+> 3) では本物のアクセストークンでないと実際の返信送信は失敗する（ログに「返信送信に失敗」と出る）。
+> 今日の確認範囲は、署名検証を通過し**オウム返し対象が確定する**ところまで。
+
 ## スクリプト
 | コマンド | 内容 |
 | --- | --- |
-| `npm run dev` | `src/index.ts` を tsx で実行（環境変数チェック） |
+| `npm run dev` | `src/server.ts` を tsx で実行（Webサーバ起動） |
+| `npm run check:env` | `src/index.ts` を実行（環境変数の単体チェック） |
 | `npm run build` | TypeScript を `dist/` へビルド |
-| `npm start` | ビルド済み `dist/index.js` を実行 |
+| `npm start` | ビルド済み `dist/server.js` を実行 |
 | `npm run typecheck` | 型チェックのみ（出力なし） |
 
 ## 開発方針（1名運用）

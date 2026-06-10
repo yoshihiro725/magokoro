@@ -1,22 +1,19 @@
 /**
  * まごころ — 環境変数チェック (Day1 / フェーズ0)
  *
- * 今日はアプリ機能を実装しない。「空の器」が正しく起動し、
- * 必要な秘匿情報が環境変数から読めているかだけを確認する。
+ * 「空の器」が正しく起動し、必要な秘匿情報が環境変数から読めているかを確認する。
+ * Webサーバ本体は src/server.ts（Day2-）。このスクリプトは env 単体チェック用。
+ *   実行: npm run check:env
  *
- * 必須（今日時点）: LINE_CHANNEL_ACCESS_TOKEN / LINE_CHANNEL_SECRET / OPENAI_API_KEY
+ * 必須（このチェック時点）: LINE_CHANNEL_ACCESS_TOKEN / LINE_CHANNEL_SECRET / OPENAI_API_KEY
  * それ以外は後続日で使用するため、未設定でも情報ログのみ（起動は止めない）。
  */
 
-// .env を読み込む（Node.js 標準。dotenv 等の依存は入れない）。
-// .env が無くても起動できるよう、失敗は握りつぶす。
-try {
-  process.loadEnvFile();
-} catch {
-  console.info("ℹ️  .env が見つかりません（環境変数から直接読み込みます）。");
-}
+import { isSet, loadEnv, missingKeys } from "./env.js";
 
-/** 今日の必須キー。未設定なら警告して終了する。 */
+loadEnv();
+
+/** 必須キー。未設定なら警告して終了する。 */
 const REQUIRED_KEYS = [
   "LINE_CHANNEL_ACCESS_TOKEN",
   "LINE_CHANNEL_SECRET",
@@ -34,21 +31,14 @@ const UPCOMING_KEYS: { key: string; usedFrom: string }[] = [
   { key: "MAIL_API_KEY", usedFrom: "W13- 見守り通知(メール)" },
 ];
 
-const isSet = (name: string): boolean => {
-  const v = process.env[name];
-  return typeof v === "string" && v.trim().length > 0;
-};
-
 console.log("=== まごころ 環境変数チェック (Day1) ===");
 
-// 必須キーの確認
-const missingRequired = REQUIRED_KEYS.filter((k) => !isSet(k));
+const missingRequired = missingKeys(REQUIRED_KEYS);
 
 for (const k of REQUIRED_KEYS) {
   console.log(`${isSet(k) ? "✅" : "❌"} [必須] ${k}`);
 }
 
-// 後続キーの確認（未設定OK）
 for (const { key, usedFrom } of UPCOMING_KEYS) {
   if (isSet(key)) {
     console.log(`✅ [後続] ${key}`);
