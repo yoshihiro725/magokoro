@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "tsx src/server.ts",
     "check:env": "tsx src/index.ts",
+    "test:openai": "tsx src/test-openai.ts",
     "build": "tsc",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit"
@@ -19,6 +20,7 @@
   },
   "dependencies": {
     "@line/bot-sdk": "^11.0.1",
-    "express": "^5.2.1"
+    "express": "^5.2.1",
+    "openai": "^6.42.0"
   }
 }

@@ -63,11 +63,25 @@ curl -i -X POST http://localhost:3000/webhook \
 > 3) では本物のアクセストークンでないと実際の返信送信は失敗する（ログに「返信送信に失敗」と出る）。
 > 今日の確認範囲は、署名検証を通過し**オウム返し対象が確定する**ところまで。
 
+## OpenAI 接続テスト
+
+OpenAI の APIキーが有効で応答が返るかを、単発呼び出しで確認する。
+
+```bash
+npm run test:openai
+```
+
+- `.env` に `OPENAI_API_KEY` があれば、実際に OpenAI へ問い合わせて応答テキストを表示する。
+- `OPENAI_API_KEY` が未設定／空なら「`OPENAI_API_KEY が未設定`」と明示して `exit 1` で終了する。
+- モデルは既定で安価な mini 級（`gpt-4o-mini`）。`OPENAI_MODEL` 環境変数で差し替え可能。
+- これは接続確認専用の単発呼び出し。会話履歴・記憶・回想療法プロンプト・ガードレールは D4 以降に実装する（今日は Webhook に LLM を組み込まない）。
+
 ## スクリプト
 | コマンド | 内容 |
 | --- | --- |
 | `npm run dev` | `src/server.ts` を tsx で実行（Webサーバ起動） |
 | `npm run check:env` | `src/index.ts` を実行（環境変数の単体チェック） |
+| `npm run test:openai` | `src/test-openai.ts` を実行（OpenAI 接続テスト） |
 | `npm run build` | TypeScript を `dist/` へビルド |
 | `npm start` | ビルド済み `dist/server.js` を実行 |
 | `npm run typecheck` | 型チェックのみ（出力なし） |
