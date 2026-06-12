@@ -7,7 +7,9 @@
  */
 
 import OpenAI from "openai";
+import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { getEnv } from "./env.js";
+import { SYSTEM_PROMPT } from "./persona.js";
 
 /**
  * 既定モデルは「安価な mini 級の現行モデル」（コスト方針）。
@@ -36,6 +38,32 @@ export class MissingApiKeyError extends Error {
  * @returns 応答テキスト
  */
 export async function askOnce(prompt: string): Promise<string> {
+  return chat([{ role: "user", content: prompt }]);
+}
+
+/**
+ * ペルソナ（システムプロンプト）付きで単発応答を返す。
+ * 会話履歴はまだ持たせない（単発）。記憶・履歴は D5 以降。
+ *
+ * @param userText 利用者の発話
+ * @param system 任意。未指定なら persona.ts の SYSTEM_PROMPT を使う。
+ * @returns 応答テキスト
+ */
+export async function askWithPersona(
+  userText: string,
+  system: string = SYSTEM_PROMPT,
+): Promise<string> {
+  return chat([
+    { role: "system", content: system },
+    { role: "user", content: userText },
+  ]);
+}
+
+/**
+ * 共通の chat completion 実行。
+ * キー未設定は MissingApiKeyError。API失敗は握りつぶさずログ出力のうえ再throw。
+ */
+async function chat(messages: ChatCompletionMessageParam[]): Promise<string> {
   const apiKey = getEnv("OPENAI_API_KEY");
   if (!apiKey) {
     throw new MissingApiKeyError();
@@ -45,10 +73,7 @@ export async function askOnce(prompt: string): Promise<string> {
   const model = getModel();
 
   try {
-    const completion = await client.chat.completions.create({
-      model,
-      messages: [{ role: "user", content: prompt }],
-    });
+    const completion = await client.chat.completions.create({ model, messages });
     const text = completion.choices[0]?.message?.content ?? "";
     return text.trim();
   } catch (e) {
