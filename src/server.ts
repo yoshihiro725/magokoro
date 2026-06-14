@@ -81,5 +81,5 @@ app.post("/webhook", express.raw({ type: "*/*" }), async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ listening on http://localhost:${PORT}`);
   console.log("   GET  /health  → 死活確認");
-  console.log("   POST /webhook → LINE Webhook（署名検証＋オウム返し）");
+  console.log("   POST /webhook → LINE Webhook（署名検証＋まごころ会話応答）");
 });
