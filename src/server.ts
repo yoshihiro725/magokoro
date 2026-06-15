@@ -66,16 +66,20 @@ app.post("/webhook", express.raw({ type: "*/*" }), async (req, res) => {
   }
 
   const events = body.events ?? [];
-  // LINEには素早く200を返し、処理は非同期で続ける。
-  res.status(200).json({ status: "ok" });
+  // まずLINEへ即座に200を返す。応答が遅いと判断されると再配信されるため。
+  res.sendStatus(200);
 
-  for (const event of events) {
-    try {
-      await handleEvent(event);
-    } catch (e) {
-      console.error("イベント処理中のエラー:", e);
+  // 以降は fire-and-forget。レスポンスは返し終えているので処理を待たない。
+  // 順序を保つため非同期IIFEで1件ずつ処理し、失敗はログのみ。
+  void (async () => {
+    for (const event of events) {
+      try {
+        await handleEvent(event);
+      } catch (e) {
+        console.error("イベント処理中のエラー:", e);
+      }
     }
-  }
+  })();
 });
 
 app.listen(PORT, () => {

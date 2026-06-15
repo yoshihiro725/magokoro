@@ -9,6 +9,7 @@
     "check:env": "tsx src/index.ts",
     "test:openai": "tsx src/test-openai.ts",
     "test:persona": "tsx src/test-persona.ts",
+    "logs:show": "tsx src/logs-show.ts",
     "build": "tsc",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit"

@@ -114,6 +114,7 @@ npm run test:persona
 | `npm run check:env` | `src/index.ts` を実行（環境変数の単体チェック） |
 | `npm run test:openai` | `src/test-openai.ts` を実行（OpenAI 接続テスト） |
 | `npm run test:persona` | `src/test-persona.ts` を実行（ペルソナ＋安全方針の目視評価） |
+| `npm run logs:show` | 当日の会話ログを整形表示（`logs:show 20260615` で日付指定）。レビュー用ローカルログ |
 | `npm run build` | TypeScript を `dist/` へビルド |
 | `npm start` | ビルド済み `dist/server.js` を実行 |
 | `npm run typecheck` | 型チェックのみ（出力なし） |

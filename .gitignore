@@ -10,3 +10,6 @@ dist
 
 # OS artifacts
 .DS_Store
+
+# レビュー用 会話ログ（要配慮個人情報になり得るため絶対にコミットしない）
+logs/

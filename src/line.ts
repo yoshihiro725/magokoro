@@ -12,6 +12,7 @@
 import { messagingApi, validateSignature, webhook } from "@line/bot-sdk";
 import { getEnv } from "./env.js";
 import { askWithPersona } from "./openai.js";
+import { appendTurn } from "./log.js";
 
 /**
  * X-Line-Signature を Channel secret で HMAC-SHA256 検証する。
@@ -73,6 +74,13 @@ function buildQuickReply(): messagingApi.QuickReply {
  * text/sticker は LLM で応答生成、その他は定型。返信には定型ボタンを添える。
  */
 export async function handleEvent(event: webhook.Event): Promise<void> {
+  // 再配信イベント（サーバ再起動後などにLINEが再送するもの）はスキップする。
+  // 返信トークンは既に期限切れで返信できず、Invalid reply token の嵐の原因になるため。
+  if (event.deliveryContext?.isRedelivery === true) {
+    console.log("↩️  再配信イベントのためスキップ");
+    return;
+  }
+
   if (event.type !== "message") {
     console.log(`ℹ️  対象外イベント: type=${event.type}`);
     return;
@@ -80,7 +88,19 @@ export async function handleEvent(event: webhook.Event): Promise<void> {
 
   const message = event.message;
   // 応答テキストを先に確定する（送信が失敗してもログで確認できるように）。
-  const replyText = await buildReplyText(message);
+  const turn = await buildReplyText(message);
+  const replyText = turn.replyText;
+
+  // レビュー用ログに1ターン追記（応答確定直後・送信可否に関わらず記録）。
+  // userId は log.ts 側でハッシュ化される（生値は残さない）。
+  appendTurn({
+    ts: new Date().toISOString(),
+    source: turn.source,
+    inputType: turn.inputType,
+    userText: turn.userText,
+    replyText,
+    userId: event.source?.userId,
+  });
 
   // replyToken はLINE仕様上オプショナル。無ければ返信できない。
   if (!event.replyToken) {
@@ -113,38 +133,97 @@ export async function handleEvent(event: webhook.Event): Promise<void> {
         e instanceof Error ? e.message : String(e)
       }`,
     );
+    // 失敗の本当の原因を特定するため、LINE返信APIのエラー詳細を出す。
+    // HTTPステータスと、LINEが返すエラー本文（例: {"message":"Invalid reply token"}）。
+    // ※アクセストークン・シークレット・署名値は出さない。
+    // @line/bot-sdk v11 は HTTPFetchError（status / body=JSON文字列）。
+    // 旧SDK形（statusCode / originalError.response）もフォールバックで拾う。
+    const err = e as {
+      status?: number;
+      statusCode?: number;
+      body?: unknown;
+      originalError?: { response?: { status?: number; data?: unknown } };
+    };
+    const status =
+      err.status ?? err.statusCode ?? err.originalError?.response?.status;
+    let data: unknown = err.body ?? err.originalError?.response?.data;
+    // body は JSON 文字列のことがあるので、見やすいよう可能ならパースする。
+    if (typeof data === "string") {
+      try {
+        data = JSON.parse(data);
+      } catch {
+        // パースできなければ文字列のまま。
+      }
+    }
+    console.warn(`   LINE APIエラー詳細: ${JSON.stringify({ status, data })}`);
   }
+}
+
+/** buildReplyText の結果（応答テキストとレビューログ用のメタ情報）。 */
+interface TurnResult {
+  replyText: string;
+  /** 入力種別: 'text' | 'button' | 'sticker' | 画像等の生type。 */
+  inputType: string;
+  /** 応答の出どころ: 'llm' | 'fallback' | 'template'。 */
+  source: string;
+  /** ログ用の利用者発話（スタンプ・未対応は内容の説明）。 */
+  userText: string;
 }
 
 /** メッセージ種別ごとに応答テキストを決める（text/sticker は LLM、他は定型）。 */
 async function buildReplyText(
   message: webhook.MessageContent,
-): Promise<string> {
+): Promise<TurnResult> {
   switch (message.type) {
-    case "text":
-      console.log(`💬 テキスト受信: "${message.text}"`);
-      return generateReply(message.text);
-    case "sticker":
+    case "text": {
+      // クイックリプライ（定型ボタン）のタップも text として届く。文言で見分ける。
+      const isButton = QUICK_REPLY_LABELS.includes(message.text);
+      console.log(
+        `${isButton ? "🔘 定型ボタン" : "💬 テキスト"}受信: "${message.text}"`,
+      );
+      const r = await generateReply(message.text);
+      return {
+        replyText: r.text,
+        inputType: isButton ? "button" : "text",
+        source: r.source,
+        userText: message.text,
+      };
+    }
+    case "sticker": {
       console.log("💟 スタンプ受信 → あたたかい応答を生成");
-      return generateReply(STICKER_HINT);
+      const r = await generateReply(STICKER_HINT);
+      return {
+        replyText: r.text,
+        inputType: "sticker",
+        source: r.source,
+        userText: `[スタンプ packageId=${message.packageId} stickerId=${message.stickerId}]`,
+      };
+    }
     default:
       console.log(`ℹ️  未対応タイプ(${message.type}) → 定型応答`);
-      return UNSUPPORTED_REPLY;
+      return {
+        replyText: UNSUPPORTED_REPLY,
+        inputType: message.type,
+        source: "template",
+        userText: `[${message.type}]`,
+      };
   }
 }
 
 /** askWithPersona を呼び、失敗時はやさしいフォールバックを返す（生エラーは返さない）。 */
-async function generateReply(userText: string): Promise<string> {
+async function generateReply(
+  userText: string,
+): Promise<{ text: string; source: "llm" | "fallback" }> {
   try {
     const reply = await askWithPersona(userText);
     console.log(`🤖 LLM応答生成: "${reply}"`);
-    return reply;
+    return { text: reply, source: "llm" };
   } catch (e) {
     console.error(
       `❌ LLM応答生成に失敗 → フォールバック返信: ${
         e instanceof Error ? e.message : String(e)
       }`,
     );
-    return FALLBACK_REPLY;
+    return { text: FALLBACK_REPLY, source: "fallback" };
   }
 }
