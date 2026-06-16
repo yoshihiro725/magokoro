@@ -3,15 +3,17 @@
  *
  * - 署名検証は「JSONパース前の生body(Buffer)」で行う（崩さないこと）。
  * - テキスト/スタンプは askWithPersona（まごころの人格）で応答を生成して返す。
- *   未対応タイプ（画像・音声など）はやさしい定型を返す（音声はD7-8）。
+ * - 音声(audio)は文字起こし(STT)してから同じ会話パイプラインに流す（D7）。音声返信(TTS)はD8。
+ *   その他の未対応タイプ（画像など）はやさしい定型を返す。
  * - 返信にはシニアが押しやすいクイックリプライ（定型ボタン）を添える。
  * - LLM失敗時は生エラーを返さず、やさしいフォールバックを返す。
  * - 会話履歴・長期記憶は持たせない（単発。記憶はW9）。秘匿情報は env 経由のみ。
  */
 
+import type { Readable } from "node:stream";
 import { messagingApi, validateSignature, webhook } from "@line/bot-sdk";
 import { getEnv } from "./env.js";
-import { askWithPersona } from "./openai.js";
+import { askWithPersona, transcribeAudio } from "./openai.js";
 import { appendTurn } from "./log.js";
 
 /**
@@ -44,17 +46,37 @@ function getClient(): messagingApi.MessagingApiClient | null {
   return client;
 }
 
+// 音声等のバイナリ取得用クライアント（v11では Blob 用クライアントが別）。
+let blobClient: messagingApi.MessagingApiBlobClient | null = null;
+function getBlobClient(): messagingApi.MessagingApiBlobClient | null {
+  const token = getEnv("LINE_CHANNEL_ACCESS_TOKEN");
+  if (!token) return null;
+  if (!blobClient) {
+    blobClient = new messagingApi.MessagingApiBlobClient({
+      channelAccessToken: token,
+    });
+  }
+  return blobClient;
+}
+
 /** スタンプ受信時に askWithPersona へ渡すヒント（利用者発話の代わり）。 */
 const STICKER_HINT =
   "（利用者がスタンプを送ってくれました。言葉ではなく気持ちの表現です。あたたかく受け止めて、短い問いかけで会話をやさしく続けてください。）";
 
-/** 未対応タイプ（画像・音声など）へのやさしい定型。音声はD7-8で対応予定。 */
+/** 未対応タイプ（画像など）へのやさしい定型。 */
 const UNSUPPORTED_REPLY =
   "メッセージをありがとうございます。文字か、下のボタンでもお話できますよ。";
 
 /** LLM呼び出しが失敗したときのやさしいフォールバック（生エラーは返さない）。 */
 const FALLBACK_REPLY =
   "ごめんなさい、少し調子が悪いみたいです。もう一度お話しいただけますか。";
+
+/** 音声の取得・文字起こしに失敗、または聞き取れなかったときのやさしい定型。 */
+const STT_FALLBACK_REPLY =
+  "ごめんなさい、うまく聞き取れませんでした。もう一度お話しいただけますか。";
+
+/** 文字起こし結果がこれ未満の長さ（空など）なら聞き取れなかった扱いにする。 */
+const MIN_TRANSCRIPT_LEN = 1;
 
 /** シニアが押しやすい定型ボタン。タップで同じ文言が通常メッセージとして送られる。 */
 const QUICK_REPLY_LABELS = ["元気だよ", "ちょっと疲れた", "昔の話をしたい", "ありがとう"];
@@ -199,6 +221,28 @@ async function buildReplyText(
         userText: `[スタンプ packageId=${message.packageId} stickerId=${message.stickerId}]`,
       };
     }
+    case "audio": {
+      console.log("🎙️  音声受信 → 文字起こし(STT)");
+      const transcript = await transcribeAudioMessage(message.id);
+      if (transcript === null) {
+        // 取得/文字起こし失敗、または空/極端に短い → 聞き取れなかった定型。
+        return {
+          replyText: STT_FALLBACK_REPLY,
+          inputType: "audio",
+          source: "fallback",
+          userText: "[音声 文字起こし失敗/空]",
+        };
+      }
+      console.log(`📝 文字起こし: "${transcript}"`);
+      // 文字起こしテキストを既存のテキスト経路に流す。
+      const r = await generateReply(transcript);
+      return {
+        replyText: r.text,
+        inputType: "audio",
+        source: r.source,
+        userText: transcript,
+      };
+    }
     default:
       console.log(`ℹ️  未対応タイプ(${message.type}) → 定型応答`);
       return {
@@ -226,4 +270,46 @@ async function generateReply(
     );
     return { text: FALLBACK_REPLY, source: "fallback" };
   }
+}
+
+/**
+ * 音声メッセージを取得して文字起こしする。
+ * 失敗・空・極端に短い場合は null を返す（呼び出し側でフォールバック）。
+ * 例外は内部で握り、サーバを落とさない。
+ */
+async function transcribeAudioMessage(
+  messageId: string,
+): Promise<string | null> {
+  const blob = getBlobClient();
+  if (!blob) {
+    console.warn("⚠️  LINE_CHANNEL_ACCESS_TOKEN 未設定のため音声を取得できません。");
+    return null;
+  }
+  try {
+    // LINEの音声はm4a。バッファ化してメモリ上で文字起こしする（一時ファイルは作らない）。
+    const stream = await blob.getMessageContent(messageId);
+    const buffer = await streamToBuffer(stream);
+    const text = await transcribeAudio(buffer, "audio.m4a");
+    if (text.trim().length < MIN_TRANSCRIPT_LEN) {
+      console.warn("⚠️  文字起こし結果が空/極端に短いため聞き取れなかった扱いにします。");
+      return null;
+    }
+    return text.trim();
+  } catch (e) {
+    console.error(
+      `❌ 音声の取得/文字起こしに失敗: ${
+        e instanceof Error ? e.message : String(e)
+      }`,
+    );
+    return null;
+  }
+}
+
+/** Readable ストリームを Buffer に集約する。 */
+async function streamToBuffer(stream: Readable): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
 }

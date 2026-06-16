@@ -8,6 +8,7 @@
 | `LINE_CHANNEL_SECRET` | LINE Webhook の署名検証 | LINE Developers Console（Messaging APIチャネル） | D2- | ✅ |
 | `OPENAI_API_KEY` | LLM による応答生成 | OpenAI Platform（API keys） | D3- | ✅ |
 | `OPENAI_MODEL` | 使用モデル名の上書き（任意。未設定なら `gpt-4o-mini`） | 設定値（取得不要） | D3-（任意） | — |
+| `OPENAI_STT_MODEL` | 音声文字起こし(STT)モデルの上書き（任意。未設定なら `whisper-1`）。`OPENAI_API_KEY` を共用 | 設定値（取得不要） | D7-（任意） | — |
 | `STT_API_KEY` | 音声→テキスト（STT） | 音声STTプロバイダ（D7-8で選定） | D7-8 | — |
 | `TTS_API_KEY` | テキスト→音声（TTS） | 音声TTSプロバイダ（D7-8で選定） | D7-8 | — |
 | `MEM0_API_KEY` | 長期記憶ストア | mem0（mem0.ai） | W9- | — |
