@@ -3,8 +3,8 @@
  *
  * - 署名検証は「JSONパース前の生body(Buffer)」で行う（崩さないこと）。
  * - テキスト/スタンプは askWithPersona（まごころの人格）で応答を生成して返す。
- * - 音声(audio)は文字起こし(STT)してから同じ会話パイプラインに流す（D7）。音声返信(TTS)はD8。
- *   その他の未対応タイプ（画像など）はやさしい定型を返す。
+ * - 音声(audio)は文字起こし(STT)してから同じ会話パイプラインに流し（D7）、
+ *   返信はテキスト＋音声(TTS)の両方で返す（D8）。その他の未対応タイプ（画像など）は定型。
  * - 返信にはシニアが押しやすいクイックリプライ（定型ボタン）を添える。
  * - LLM失敗時は生エラーを返さず、やさしいフォールバックを返す。
  * - 会話履歴・長期記憶は持たせない（単発。記憶はW9）。秘匿情報は env 経由のみ。
@@ -13,7 +13,8 @@
 import type { Readable } from "node:stream";
 import { messagingApi, validateSignature, webhook } from "@line/bot-sdk";
 import { getEnv } from "./env.js";
-import { askWithPersona, transcribeAudio } from "./openai.js";
+import { askWithPersona, synthesizeSpeech, transcribeAudio } from "./openai.js";
+import { cleanupOldAudio, saveM4aFromMp3 } from "./audio.js";
 import { appendTurn } from "./log.js";
 
 /**
@@ -94,8 +95,15 @@ function buildQuickReply(): messagingApi.QuickReply {
 /**
  * 1イベントを処理する。message イベントのみ対応。
  * text/sticker は LLM で応答生成、その他は定型。返信には定型ボタンを添える。
+ * 音声入力にはテキスト＋音声(TTS)で返す（音声化URLの組み立てに baseUrl を使う）。
+ *
+ * @param event LINE Webhook イベント
+ * @param baseUrl 公開ベースURL（音声配信URLの組み立て用。無ければ音声返信はスキップ）
  */
-export async function handleEvent(event: webhook.Event): Promise<void> {
+export async function handleEvent(
+  event: webhook.Event,
+  baseUrl?: string,
+): Promise<void> {
   // 再配信イベント（サーバ再起動後などにLINEが再送するもの）はスキップする。
   // 返信トークンは既に期限切れで返信できず、Invalid reply token の嵐の原因になるため。
   if (event.deliveryContext?.isRedelivery === true) {
@@ -139,15 +147,24 @@ export async function handleEvent(event: webhook.Event): Promise<void> {
     return;
   }
 
+  // 返信メッセージを組み立てる。テキストは常に送る（読みやすさのため）。
+  const messages: messagingApi.Message[] = [{ type: "text", text: replyText }];
+
+  // 音声入力には音声(TTS)でも返す。失敗してもテキストは届く（best-effort）。
+  if (turn.inputType === "audio") {
+    const voice = await tryBuildVoiceMessage(replyText, baseUrl);
+    if (voice) messages.push(voice);
+  }
+
+  // クイックリプライは最後のメッセージに付ける（LINEは最後の定義を表示するため）。
+  messages[messages.length - 1].quickReply = buildQuickReply();
+
   try {
     console.log(
-      `📤 送信準備: 本文+クイックリプライ[${QUICK_REPLY_LABELS.join(" / ")}]`,
+      `📤 送信準備: ${messages.map((m) => m.type).join("+")} +クイックリプライ[${QUICK_REPLY_LABELS.join(" / ")}]`,
     );
-    await c.replyMessage({
-      replyToken,
-      messages: [{ type: "text", text: replyText, quickReply: buildQuickReply() }],
-    });
-    console.log("✅ 返信送信成功（クイックリプライ付き）。");
+    await c.replyMessage({ replyToken, messages });
+    console.log("✅ 返信送信成功。");
   } catch (e) {
     // ダミートークン等で送信失敗してもハンドラ到達は確認できる。
     console.warn(
@@ -298,6 +315,36 @@ async function transcribeAudioMessage(
   } catch (e) {
     console.error(
       `❌ 音声の取得/文字起こしに失敗: ${
+        e instanceof Error ? e.message : String(e)
+      }`,
+    );
+    return null;
+  }
+}
+
+/**
+ * 返信テキストを音声(TTS→m4a)にして LINE の音声メッセージを作る。
+ * baseUrl が無い／TTSや変換に失敗した場合は null（テキストのみで返す）。
+ */
+async function tryBuildVoiceMessage(
+  text: string,
+  baseUrl: string | undefined,
+): Promise<messagingApi.AudioMessage | null> {
+  if (!baseUrl) {
+    console.warn("⚠️  公開URL(baseUrl)が無いため音声返信をスキップ（テキストのみ）。");
+    return null;
+  }
+  try {
+    // 古い音声を都度掃除（要配慮個人情報を溜めない）。
+    await cleanupOldAudio();
+    const mp3 = await synthesizeSpeech(text);
+    const { fileName, durationMs } = await saveM4aFromMp3(mp3);
+    const originalContentUrl = `${baseUrl}/audio/${fileName}`;
+    console.log(`🔊 音声返信を生成: ${originalContentUrl} (${durationMs}ms)`);
+    return { type: "audio", originalContentUrl, duration: durationMs };
+  } catch (e) {
+    console.error(
+      `❌ 音声返信の生成に失敗（テキストのみで返します）: ${
         e instanceof Error ? e.message : String(e)
       }`,
     );

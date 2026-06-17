@@ -7,10 +7,12 @@
  * 公開URLでの疎通確認は D3。今日はローカルで起動・型・署名検証まで。
  */
 
+import { mkdirSync } from "node:fs";
 import express from "express";
 import type { webhook } from "@line/bot-sdk";
 import { getEnv, loadEnv, missingKeys } from "./env.js";
 import { handleEvent, verifyLineSignature } from "./line.js";
+import { PUBLIC_AUDIO_DIR } from "./audio.js";
 
 loadEnv();
 
@@ -30,6 +32,19 @@ if (missing.length > 0) {
 const PORT = Number(getEnv("PORT") ?? "3000");
 
 const app = express();
+
+// 生成音声(m4a)の静的配信。LINEが取得するので Content-Type を明示する。
+// ngrok の警告ページ回避ヘッダも付けておく（LINEの取得には通常不要だが保険）。
+mkdirSync(PUBLIC_AUDIO_DIR, { recursive: true });
+app.use(
+  "/audio",
+  express.static(PUBLIC_AUDIO_DIR, {
+    setHeaders: (res) => {
+      res.setHeader("Content-Type", "audio/m4a");
+      res.setHeader("ngrok-skip-browser-warning", "true");
+    },
+  }),
+);
 
 // 死活確認。
 app.get("/health", (_req, res) => {
@@ -66,6 +81,15 @@ app.post("/webhook", express.raw({ type: "*/*" }), async (req, res) => {
   }
 
   const events = body.events ?? [];
+
+  // 音声配信用の公開ベースURL。PUBLIC_BASE_URL を優先、無ければヘッダから導出。
+  const proto = (req.header("x-forwarded-proto") ?? req.protocol ?? "https")
+    .split(",")[0]
+    .trim();
+  const host = req.header("x-forwarded-host") ?? req.header("host");
+  const derivedBase = host ? `${proto}://${host}` : undefined;
+  const baseUrl = getEnv("PUBLIC_BASE_URL") ?? derivedBase;
+
   // まずLINEへ即座に200を返す。応答が遅いと判断されると再配信されるため。
   res.sendStatus(200);
 
@@ -74,7 +98,7 @@ app.post("/webhook", express.raw({ type: "*/*" }), async (req, res) => {
   void (async () => {
     for (const event of events) {
       try {
-        await handleEvent(event);
+        await handleEvent(event, baseUrl);
       } catch (e) {
         console.error("イベント処理中のエラー:", e);
       }
